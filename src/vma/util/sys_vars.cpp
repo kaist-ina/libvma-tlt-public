@@ -585,8 +585,13 @@ void mce_sys_var::get_env_params()
 	internal_thread_arm_cq_enabled	= MCE_DEFAULT_INTERNAL_THREAD_ARM_CQ_ENABLED;
 
 	offloaded_sockets	= MCE_DEFAULT_OFFLOADED_SOCKETS;
+#if TIMER_US_GRAN
+	timer_resolution_usec	= MCE_DEFAULT_TIMER_RESOLUTION_USEC;
+	tcp_timer_resolution_usec= MCE_DEFAULT_TCP_TIMER_RESOLUTION_USEC;
+#else
 	timer_resolution_msec	= MCE_DEFAULT_TIMER_RESOLUTION_MSEC;
 	tcp_timer_resolution_msec= MCE_DEFAULT_TCP_TIMER_RESOLUTION_MSEC;
+#endif
 	internal_thread_tcp_timer_handling = MCE_DEFAULT_INTERNAL_THREAD_TCP_TIMER_HANDLING;
 	tcp_ctl_thread		= MCE_DEFAULT_TCP_CTL_THREAD;
 	tcp_ts_opt		= MCE_DEFAULT_TCP_TIMESTAMP_OPTION;
@@ -1106,11 +1111,19 @@ void mce_sys_var::get_env_params()
 	if ((env_ptr = getenv(SYS_VAR_OFFLOADED_SOCKETS)) != NULL)
 		offloaded_sockets = atoi(env_ptr) ? true : false;
 
+#if TIMER_US_GRAN
+	if ((env_ptr = getenv(SYS_VAR_TIMER_RESOLUTION_USEC)) != NULL)
+		timer_resolution_usec = atoi(env_ptr);
+
+	if ((env_ptr = getenv(SYS_VAR_TCP_TIMER_RESOLUTION_USEC)) != NULL)
+		tcp_timer_resolution_usec = atoi(env_ptr);
+#else
 	if ((env_ptr = getenv(SYS_VAR_TIMER_RESOLUTION_MSEC)) != NULL)
 		timer_resolution_msec = atoi(env_ptr);
 
 	if ((env_ptr = getenv(SYS_VAR_TCP_TIMER_RESOLUTION_MSEC)) != NULL)
 		tcp_timer_resolution_msec = atoi(env_ptr);
+#endif
 
 	if ((env_ptr = getenv(SYS_VAR_INTERNAL_THREAD_TCP_TIMER_HANDLING)) != NULL) {
 		internal_thread_tcp_timer_handling =
@@ -1152,10 +1165,17 @@ void mce_sys_var::get_env_params()
 		allow_privileged_sock_opt = atoi(env_ptr) ? true : false;
 	}
 
+#if TIMER_US_GRAN
+	if(tcp_timer_resolution_usec < timer_resolution_usec){
+		vlog_printf(VLOG_WARNING," TCP timer resolution [%s=%d] cannot be smaller than timer resolution [%s=%d]. Setting TCP timer resolution to %d usec.\n", SYS_VAR_TCP_TIMER_RESOLUTION_USEC, tcp_timer_resolution_usec, SYS_VAR_TIMER_RESOLUTION_USEC, timer_resolution_usec, timer_resolution_usec);
+		tcp_timer_resolution_usec = timer_resolution_usec;
+	}
+#else
 	if(tcp_timer_resolution_msec < timer_resolution_msec){
 		vlog_printf(VLOG_WARNING," TCP timer resolution [%s=%d] cannot be smaller than timer resolution [%s=%d]. Setting TCP timer resolution to %d msec.\n", SYS_VAR_TCP_TIMER_RESOLUTION_MSEC, tcp_timer_resolution_msec, SYS_VAR_TIMER_RESOLUTION_MSEC, timer_resolution_msec, timer_resolution_msec);
 		tcp_timer_resolution_msec = timer_resolution_msec;
 	}
+#endif
 
 	if ((env_ptr = getenv(SYS_VAR_INTERNAL_THREAD_ARM_CQ)) != NULL)
 		internal_thread_arm_cq_enabled = atoi(env_ptr) ? true : false;

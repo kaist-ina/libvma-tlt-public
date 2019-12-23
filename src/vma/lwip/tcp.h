@@ -32,6 +32,9 @@
 #ifndef __LWIP_TCP_H__
 #define __LWIP_TCP_H__
 
+#define DEBUG_TLT_SACK(msg, ...)
+//printf("%s:%d:" msg "\n", __FILE__, __LINE__, ## __VA_ARGS__)
+
 #include "vma/lwip/opt.h"
 
 #if LWIP_TCP /* don't build if not configured for use in lwipopts.h */
@@ -52,9 +55,9 @@ extern u16_t lwip_tcp_mss;
 
 #if LWIP_3RD_PARTY_L3
 #if LWIP_TSO
-typedef err_t (*ip_output_fn)(struct pbuf *p, void* p_conn, u16_t flags);
+typedef err_t (*ip_output_fn)(struct pbuf *p, void* p_conn, u16_t flags, u8_t tos);
 #else
-typedef err_t (*ip_output_fn)(struct pbuf *p, void* p_conn, int is_rexmit, u8_t is_dummy);
+typedef err_t (*ip_output_fn)(struct pbuf *p, void* p_conn, int is_rexmit, u8_t is_dummy, u8_t tos);
 #endif /* LWIP_TSO */
 void register_ip_output(ip_output_fn fn);
 
@@ -272,6 +275,19 @@ extern tcp_state_observer_fn external_tcp_state_observer;
 	(pcb)->max_unsent_len = (16*((pcb)->max_snd_buff)/((pcb)->mss)); \
 	(pcb)->tcp_oversize_val = (pcb)->mss; 
 
+struct tcp_sack_block {
+  u32_t block_le;
+  u32_t block_re;
+};
+
+typedef u16_t (*ip_route_mtu_fn)(struct tcp_pcb *pcb);
+#if LWIP_TCP_TLT
+#include "vma/lwip/tlt.h"
+#endif
+#if LWIP_DCTCP
+#include "dctcp.h"
+#endif
+
 /* the TCP protocol control block */
 struct tcp_pcb {
 /** common PCB members */
@@ -316,9 +332,10 @@ struct tcp_pcb {
 #if TCP_CC_ALGO_MOD
   u32_t t_rttupdated; /* number of RTT estimations taken so far */
 #endif
-  s16_t sa, sv; /* @todo document this */
+  s32_t sa, sv; /* @todo document this */
 
-  s16_t rto;    /* retransmission time-out */
+  s32_t rto;    /* retransmission time-out */
+  s32_t minrto; /* minimum rto */
   u8_t nrtx;    /* number of retransmissions */
 
   /* fast retransmit/recovery */
@@ -348,7 +365,7 @@ struct tcp_pcb {
 
   u32_t snd_sml_snt; /* maintain state for minshall's algorithm */
   u32_t snd_sml_add; /* maintain state for minshall's algorithm */
-
+  u32_t iss; /* recored iss */
 #define TCP_SNDQUEUELEN_OVERFLOW (0xffffffU-3)
   u32_t snd_queuelen; /* Available buffer space for sending (in tcp_segs). */
   u32_t max_tcp_snd_queuelen; 
@@ -391,6 +408,19 @@ struct tcp_pcb {
   u32_t ts_recent;
 #endif /* LWIP_TCP_TIMESTAMPS */
 
+#if LWIP_TCP_SACK
+#define LWIP_TCP_SACK_BLOCK_LEN 16
+  u8_t sack_permitted;
+
+  /* Sender's SACK block */
+  struct tcp_sack_block snd_sack_block[LWIP_TCP_SACK_BLOCK_LEN];
+  /* Receiver's SACK block */
+  struct tcp_sack_block rcv_sack_block[LWIP_TCP_SACK_BLOCK_LEN];
+  u8_t rcv_sack_block_cnt;
+  u8_t snd_sack_block_cnt;
+
+#endif /* LWIP_TCP_SACK */
+
   /* idle time before KEEPALIVE is sent */
   u32_t keep_idle;
 #if LWIP_TCP_KEEPALIVE
@@ -417,6 +447,20 @@ struct tcp_pcb {
   /* Delayed ACK control: number of quick acks */
   u8_t quickack;
 
+
+#if LWIP_TCP_TLT
+  struct tlt_param tlt;
+#endif
+
+#if LWIP_DCTCP
+  struct dctcp_param dctcp;
+#endif
+
+#if LWIP_DEBUG_RTO
+  u32_t *rto_log;
+  int rto_log_cnt;
+#endif
+
 #if LWIP_TSO
   /* TSO description */
   struct {
@@ -435,7 +479,12 @@ struct tcp_pcb {
 #endif /* LWIP_TSO */
 };
 
-typedef u16_t (*ip_route_mtu_fn)(struct tcp_pcb *pcb);
+#if LWIP_DEBUG_RTO
+#define DEBUG_RTO_LOG(pcb, rto) if((pcb)->rto_log_cnt < MAX_LOG_RTO) (pcb)->rto_log[(pcb)->rto_log_cnt++] = (rto); \
+        printf("RTO update to %u (sa=%u, sv=%u, m=%u, tcp_tick=%u) at %s:%d\n", (rto), (pcb)->sa, (pcb)->sv,  tcp_ticks - (pcb)->rttest, tcp_ticks, __FILE__, __LINE__);
+#else
+#define DEBUG_RTO_LOG(pcb, rto) 
+#endif
 void register_ip_route_mtu(ip_route_mtu_fn fn);
 
 #ifdef VMA_NO_TCP_PCB_LISTEN_STRUCT

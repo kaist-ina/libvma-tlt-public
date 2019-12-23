@@ -283,7 +283,7 @@ cubic_conn_init(struct tcp_pcb *pcb)
 {
 	struct cubic *cubic_data = pcb->cc_data;
 
-	pcb->cwnd = ((pcb->cwnd == 1) ? (pcb->mss * 2) : pcb->mss);
+	pcb->cwnd = ((pcb->cwnd == 1) ? (pcb->mss * 10) : pcb->mss);
 	pcb->ssthresh = pcb->mss * 3;
 	/*
 	 * Ensure we have a sane initial value for max_cwnd recorded. Without

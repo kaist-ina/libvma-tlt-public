@@ -663,6 +663,13 @@
 #endif
 
 /**
+ * LWIP_TCP_SACK==1: support the TCP SACK option.
+ */
+#ifndef LWIP_TCP_SACK
+#define LWIP_TCP_SACK             1
+#endif
+
+/**
  * TCP_WND_UPDATE_THRESHOLD: difference in window to trigger an
  * explicit window update
  */
@@ -847,6 +854,24 @@
 #else
 #define LWIP_TSO                        0
 #endif /* DEFINED_TSO */
+#endif
+
+/**
+ * LWIP_TCP_TLT==1: support TLT.
+ */
+#ifndef LWIP_TCP_TLT
+#define LWIP_TCP_TLT          1
+#endif
+
+
+#ifndef LWIP_DCTCP
+#define LWIP_DCTCP               1
+#endif
+
+
+#ifndef LWIP_DEBUG_RTO
+#define LWIP_DEBUG_RTO  0
+#define MAX_LOG_RTO 1000
 #endif
 
 /* Define platform endianness */

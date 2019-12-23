@@ -77,13 +77,29 @@ event_handler_manager* g_p_event_handler_manager = NULL;
 
 pthread_t g_n_internal_thread_id = 0;
 
-
+#if TIMER_US_GRAN
 void* event_handler_manager::register_timer_event(int timeout_msec, timer_handler* handler, 
 						  timer_req_type_t req_type, void* user_data,
 						  timers_group* group /* = NULL */)
 {
+	return this->register_timer_event_us((long)timeout_msec * 1000L, handler, req_type, user_data, group);
+}
+void* event_handler_manager::register_timer_event_us(long timeout_usec, timer_handler* handler, 
+						  timer_req_type_t req_type, void* user_data,
+						  timers_group* group /* = NULL */)
+#else
+void* event_handler_manager::register_timer_event(int timeout_msec, timer_handler* handler, 
+						  timer_req_type_t req_type, void* user_data,
+						  timers_group* group /* = NULL */)
+#endif
+{
+#if TIMER_US_GRAN
+	evh_logdbg("timer handler '%p' registered %s timer for %ld usec (user data: %X)",
+		   handler, timer_req_type_str(req_type), timeout_usec, user_data);
+#else
 	evh_logdbg("timer handler '%p' registered %s timer for %d msec (user data: %X)",
 		   handler, timer_req_type_str(req_type), timeout_msec, user_data);
+#endif
 	BULLSEYE_EXCLUDE_BLOCK_START
 	if (!handler || (req_type < 0 || req_type >= INVALID_TIMER)) {
 		evh_logwarn("bad timer type (%d) or handler (%p)", req_type, handler);
@@ -110,7 +126,11 @@ void* event_handler_manager::register_timer_event(int timeout_msec, timer_handle
 	reg_action.info.timer.user_data = user_data;
 	reg_action.info.timer.group = group;
 	reg_action.info.timer.node = node;
+#if TIMER_US_GRAN
+	reg_action.info.timer.timeout_usec = timeout_usec;
+#else
 	reg_action.info.timer.timeout_msec = timeout_msec;
+#endif
 	reg_action.info.timer.req_type = req_type;
 	post_new_reg_action(reg_action);
 	return node;
@@ -226,12 +246,19 @@ void event_handler_manager::register_command_event(int fd, command* cmd)
 	post_new_reg_action(reg_action);
 
 }
-
+#if TIMER_US_GRAN
+event_handler_manager::event_handler_manager() :
+		m_reg_action_q_lock("reg_action_q_lock"),
+		m_b_sysvar_internal_thread_arm_cq_enabled(safe_mce_sys().internal_thread_arm_cq_enabled),
+		m_n_sysvar_vma_time_measure_num_samples(safe_mce_sys().vma_time_measure_num_samples),
+		m_n_sysvar_timer_resolution_usec(safe_mce_sys().timer_resolution_usec)
+#else
 event_handler_manager::event_handler_manager() :
 		m_reg_action_q_lock("reg_action_q_lock"),
 		m_b_sysvar_internal_thread_arm_cq_enabled(safe_mce_sys().internal_thread_arm_cq_enabled),
 		m_n_sysvar_vma_time_measure_num_samples(safe_mce_sys().vma_time_measure_num_samples),
 		m_n_sysvar_timer_resolution_msec(safe_mce_sys().timer_resolution_msec)
+#endif
 {
 	evh_logfunc("");
 
@@ -449,8 +476,13 @@ void event_handler_manager::priv_register_timer_handler(timer_reg_info_t& info)
 	if (info.group) {
 		info.group->add_new_timer((timer_node_t*)info.node, info.handler, info.user_data);
 	} else {
+#if TIMER_US_GRAN
+		m_timer.add_new_timer_us(info.timeout_usec, (timer_node_t*)info.node,
+			       info.handler, info.user_data, info.req_type);
+#else
 		m_timer.add_new_timer(info.timeout_msec, (timer_node_t*)info.node,
 			       info.handler, info.user_data, info.req_type);
+#endif
 	}
 }
 
@@ -879,7 +911,11 @@ The main loop actions:
 
 void* event_handler_manager::thread_loop()
 {
+#if TIMER_US_GRAN
+	long timeout_usec;
+#else
 	int timeout_msec;
+#endif
 	int maxevents = INITIAL_EVENTS_NUM;
 	struct pollfd poll_fd;
 	struct epoll_event* p_events = (struct epoll_event*)malloc(sizeof(struct epoll_event)*maxevents);	
@@ -899,12 +935,21 @@ void* event_handler_manager::thread_loop()
 #endif
 
 		// update timer and get timeout
+#if TIMER_US_GRAN
+		timeout_usec = m_timer.update_timeout();
+		if (timeout_usec == 0) {
+			// at least one timer has expired!
+			m_timer.process_registered_timers();
+			continue;
+		}
+#else
 		timeout_msec = m_timer.update_timeout();
 		if (timeout_msec == 0) {
 			// at least one timer has expired!
 			m_timer.process_registered_timers();
 			continue;
 		}
+#endif
 
 		if( m_b_sysvar_internal_thread_arm_cq_enabled && m_cq_epfd == 0 && g_p_net_device_table_mgr) {
 			m_cq_epfd = g_p_net_device_table_mgr->global_ring_epfd_get();
@@ -926,14 +971,31 @@ void* event_handler_manager::thread_loop()
 		}
 
 		// Make sure we sleep for a minimum of X milli seconds
+#if TIMER_US_GRAN
+		if (timeout_usec > 0) {
+			if ((int)m_n_sysvar_timer_resolution_usec > timeout_usec) {
+				timeout_usec = m_n_sysvar_timer_resolution_usec;
+			}
+		}
+#else
 		if (timeout_msec > 0) {
 			if ((int)m_n_sysvar_timer_resolution_msec > timeout_msec) {
 				timeout_msec = m_n_sysvar_timer_resolution_msec;
 			}
 		}
+#endif
 
+#if TIMER_US_GRAN
+		long truncated_timeout_msec = timeout_usec / 1000; // might be 0. If 0, epoll_wait returns immediately
+		evh_logfuncall("calling orig_os_api.epoll with %ld usec (truncated to %ld msec) timeout", timeout_usec, truncated_timeout_msec);
+		int ret = orig_os_api.epoll_wait(m_epfd, p_events, maxevents, truncated_timeout_msec);
+		if (truncated_timeout_msec == 0 && ret == 0) {
+			usleep(timeout_usec);
+		}
+#else
 		evh_logfuncall("calling orig_os_api.epoll with %d msec timeout", timeout_msec);
 		int ret = orig_os_api.epoll_wait(m_epfd, p_events, maxevents, timeout_msec);
+#endif
 		if (ret < 0) {
 			evh_logfunc("epoll returned with error, errno=%d %m)", errno);
 			continue;

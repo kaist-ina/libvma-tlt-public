@@ -258,6 +258,7 @@ ssize_t dst_entry_tcp::fast_send(const iovec* p_iov, const ssize_t sz_iov, bool 
 			//todo can we handle this in migration (by going over all buffers lwip hold) instead for every send?
 		}
 	} else {
+		p_tcp_iov = (tcp_iovec*)p_iov;
 		no_copy = false;
 	}
 
@@ -271,7 +272,9 @@ ssize_t dst_entry_tcp::fast_send(const iovec* p_iov, const ssize_t sz_iov, bool 
 		// L2 header
 		//p_pkt = (tx_packet_template_t*)((uint8_t*)p_pkt + hdr_alignment_diff);
 		p_pkt->hdr.m_ip_hdr.tot_len = (htons)(p_tcp_iov[0].iovec.iov_len + m_header.m_ip_header_len);
-
+#if (LWIP_TCP_TLT || LWIP_DCTCP)
+		p_pkt->hdr.m_ip_hdr.tos = p_tcp_iov[0].p_tos;
+#endif
 		m_sge[0].addr = (uintptr_t)((uint8_t*)p_pkt + hdr_alignment_diff);
 		m_sge[0].length = total_packet_len;
 
@@ -319,7 +322,9 @@ ssize_t dst_entry_tcp::fast_send(const iovec* p_iov, const ssize_t sz_iov, bool 
 
 		p_pkt = (tx_packet_template_t*)((uint8_t*)p_mem_buf_desc->p_buffer);
 		p_pkt->hdr.m_ip_hdr.tot_len = (htons)(m_sge[0].length - m_header.m_transport_header_len);
-
+#if (LWIP_TCP_TLT || LWIP_DCTCP)
+		p_pkt->hdr.m_ip_hdr.tos = p_tcp_iov[0].p_tos;
+#endif
 		p_mem_buf_desc->tx.p_ip_h = &p_pkt->hdr.m_ip_hdr;
 		p_mem_buf_desc->tx.p_tcp_h =  (struct tcphdr*)((uint8_t*)(&(p_pkt->hdr.m_ip_hdr))+sizeof(p_pkt->hdr.m_ip_hdr));
 
@@ -409,7 +414,21 @@ ssize_t dst_entry_tcp::pass_buff_to_neigh(const iovec * p_iov, size_t sz_iov, ui
 	NOT_IN_USE(packet_id);
 	m_header_neigh.init();
 	m_header_neigh.configure_tcp_ports(m_dst_port, m_src_port);
+#if (LWIP_TCP_TLT || LWIP_DCTCP)
+	ssize_t ret_val = 0;
+	configure_ip_header(&m_header_neigh, packet_id);
+	tcp_iovec *p_tcp_iov = reinterpret_cast<tcp_iovec*>(const_cast<iovec *>(p_iov));
+	if (m_p_neigh_entry) {
+		neigh_send_info n_send_info(const_cast<iovec *>(p_iov),
+				sz_iov, &m_header_neigh,
+				get_protocol_type(), get_route_mtu(),
+				p_tcp_iov->p_tos);
+		ret_val = m_p_neigh_entry->send(n_send_info);
+	}
+	return ret_val;
+#else
 	return(dst_entry::pass_buff_to_neigh(p_iov, sz_iov));
+#endif
 }
 
 mem_buf_desc_t* dst_entry_tcp::get_buffer(bool b_blocked /*=false*/)

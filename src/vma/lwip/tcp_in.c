@@ -50,6 +50,12 @@
 
 #include <string.h>
 
+#define LWIP_TCP_DUP_ACK_THRESH 1
+
+#if LWIP_TCP_TLT
+#include "tlt.h"
+#endif
+
 typedef struct tcp_in_data {
 	struct pbuf *recv_data;
 	struct tcp_hdr *tcphdr;
@@ -60,6 +66,10 @@ typedef struct tcp_in_data {
 	u16_t tcplen;
 	u8_t flags;
 	u8_t recv_flags;
+#if LWIP_TCP_SACK
+  struct tcp_sack_block sack_block[4];
+  u8_t sack_block_cnt;
+#endif
 } tcp_in_data;
 
 struct tcp_pcb *tcp_input_pcb;
@@ -121,6 +131,7 @@ L3_level_tcp_input(struct pbuf *p, struct tcp_pcb* pcb)
         TCP_STATS_INC(tcp.lenerr);
         TCP_STATS_INC(tcp.drop);
         pbuf_free(p);
+        printf("Error: PACKET SHORT DROP!!\n");
         return;
     }
 
@@ -133,6 +144,7 @@ L3_level_tcp_input(struct pbuf *p, struct tcp_pcb* pcb)
         TCP_STATS_INC(tcp.lenerr);
         TCP_STATS_INC(tcp.drop);
         pbuf_free(p);
+        printf("Error: PACKET SHORT DROP2!!\n");
         return;
     }
 
@@ -169,6 +181,19 @@ L3_level_tcp_input(struct pbuf *p, struct tcp_pcb* pcb)
 
 			in_data.recv_data = NULL;
 			in_data.recv_flags = 0;
+
+#if LWIP_TCP_TLT
+      if (tlt_in(pcb, &in_data.inseg, IPH_TOS(in_data.iphdr)) == PACKET_DROP) {
+        /* drop packets by tlt */
+        // DEBUG_TLT_TLT("Dropping by TLT");
+        // pbuf_free(p);
+        // return;
+      }
+#endif
+
+#if LWIP_DCTCP
+      dctcp_recv(pcb, IPH_TOS(in_data.iphdr) & 0x3 , in_data.tcphdr);
+#endif
 
 			/* If there is data which was previously "refused" by upper layer */
 			while (pcb->refused_data != NULL) { // 'while' instead of 'if' because windows scale uses large pbuf
@@ -588,6 +613,20 @@ tcp_process(struct tcp_pcb *pcb, tcp_in_data* in_data)
         return ERR_ABRT;
       }
       tcp_ack_now(pcb);
+      if(pcb->rttest) {
+        // s16_t m = (s16_t)(tcp_ticks - pcb->rttest);
+        // m = m - (pcb->sa >> 3);
+        // pcb->sa += m;
+        // if (m < 0) {
+        //   m = -m;
+        // }
+        // m = m - (pcb->sv >> 2);
+        // pcb->sv += m;
+        // pcb->rto = MAX((pcb->sa >> 3) + pcb->sv, pcb->minrto);
+        // extern u32_t slow_tmr_interval;
+        // DEBUG_RTO_LOG(pcb, pcb->rto * slow_tmr_interval);
+        pcb->rttest = 0;
+      }
     }
     /* received ACK? possibly a half-open connection */
     else if (in_data->flags & TCP_ACK) {
@@ -792,7 +831,7 @@ tcp_shrink_segment(struct tcp_pcb *pcb, struct tcp_seg *seg, u32_t ackno)
   }
 #endif /* LWIP_TCP_TIMESTAMPS */
 
-  optlen += LWIP_TCP_OPT_LENGTH(optflags);
+  optlen += LWIP_TCP_OPT_LENGTH(pcb, optflags);
 
   cur_p = seg->p->next;
 
@@ -883,7 +922,7 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
 #endif /* TCP_QUEUE_OOSEQ */
   struct pbuf *p;
   s32_t off;
-  s16_t m;
+  s32_t m;
   u32_t right_wnd_edge;
   u16_t new_tot_len;
   int found_dupack = 0;
@@ -924,6 +963,58 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
 #endif /* TCP_WND_DEBUG */
     }
 
+#if LWIP_TCP_SACK
+    if (pcb->sack_permitted) {
+      /* maybe this block is useles */
+      // if (in_data->sack_block_cnt) {
+      //   pcb->snd_sack_block_cnt = in_data->sack_block_cnt;
+      //   memcpy(pcb->snd_sack_block, in_data->sack_block, sizeof(in_data->sack_block));
+      // } else {
+      //   if (pcb->snd_sack_block_cnt) {
+      //     pcb->snd_sack_block_cnt = 0;
+      //     memset(&pcb->snd_sack_block, 0, sizeof(pcb->snd_sack_block));
+      //   }
+      // }
+      /* remove from pcb's unacked queue : naive implementation */
+      struct tcp_seg *seg_sacked = pcb->unacked;
+      struct tcp_seg *prev_seg = NULL;
+      if (seg_sacked != NULL && in_data->sack_block_cnt) {
+        for(; seg_sacked != NULL;) {
+          int sacked = 0;
+          struct tcp_sack_block target_sb = { .block_le = seg_sacked->seqno, .block_re = seg_sacked->seqno + seg_sacked->len };
+          for(int i=0; i<in_data->sack_block_cnt; i++) {  
+            struct tcp_sack_block cur_sb = in_data->sack_block[i];
+            if (TCP_SEQ_LEQ(cur_sb.block_le, target_sb.block_le) && TCP_SEQ_LEQ(target_sb.block_re, cur_sb.block_re)) {
+              sacked = 1;
+              
+              // DEBUG_TLT_SACK("SACKed Detected: %u << %u - %u >> %u", cur_sb.block_le, target_sb.block_le, target_sb.block_re, cur_sb.block_re);
+              break;
+            } else if (TCP_SEQ_LEQ(cur_sb.block_le, target_sb.block_le)) {
+              /* SEQ # cur_sb.block_re - target_sb.block_re may be in another SACK block */
+              target_sb.block_le = cur_sb.block_re;
+            }
+          }
+          struct tcp_seg *t = seg_sacked->next;
+          if (sacked) {
+            
+              DEBUG_TLT_SACK("Removing SACKed seg: %u - %u", seg_sacked->seqno, seg_sacked->seqno + seg_sacked->len);
+            if (prev_seg != NULL) {
+              prev_seg->next = seg_sacked->next;
+            } else {
+              pcb->unacked = seg_sacked->next;
+            }          
+            
+            pcb->snd_queuelen -= pbuf_clen(seg_sacked->p);
+            tcp_tx_seg_free(pcb, seg_sacked);
+          } else {
+            prev_seg = seg_sacked;
+          }
+          seg_sacked = t;
+        }
+      }
+    }
+    
+#endif
     /* (From Stevens TCP/IP Illustrated Vol II, p970.) Its only a
      * duplicate ack if:
      * 1) It doesn't ACK new data 
@@ -958,7 +1049,7 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
               found_dupack = 1;
               if ((u8_t)(pcb->dupacks + 1) > pcb->dupacks)
                 ++pcb->dupacks;
-              if (pcb->dupacks > 3) {
+              if (pcb->dupacks > LWIP_TCP_DUP_ACK_THRESH) {
 #if TCP_CC_ALGO_MOD
         	cc_ack_received(pcb, CC_DUPACK);
 #else
@@ -968,7 +1059,7 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
         	  pcb->cwnd += pcb->mss;
         	}
 #endif //TCP_CC_ALGO_MOD
-              } else if (pcb->dupacks == 3) {
+              } else if (pcb->dupacks == LWIP_TCP_DUP_ACK_THRESH) {
                 /* Do fast retransmit */
                 tcp_rexmit_fast(pcb);
 #if TCP_CC_ALGO_MOD
@@ -985,6 +1076,50 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
       if (!found_dupack) {
         pcb->dupacks = 0;
       }
+
+#if LWIP_TCP_TLT
+      /* Remove segment from the unacknowledged list if the incoming
+         ACK acknowlegdes them. */
+#if LWIP_TSO
+      #error("NOT implemented")
+#else
+      while (pcb->unacked != NULL &&
+             TCP_SEQ_LEQ(pcb->unacked->seqno + TCP_TCPLEN(pcb->unacked), in_data->ackno)) {
+#endif /* LWIP_TSO */
+        LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_receive: removing %"U32_F":%"U32_F" from pcb->unacked\n",
+                                      ntohl(pcb->unacked->tcphdr->seqno),
+                                      ntohl(pcb->unacked->tcphdr->seqno) +
+                                      TCP_TCPLEN(pcb->unacked)));
+
+        next = pcb->unacked;
+        pcb->unacked = pcb->unacked->next;
+        LWIP_DEBUGF(TCP_QLEN_DEBUG, ("tcp_receive: queuelen %"U32_F" ... ", (u32_t)pcb->snd_queuelen));
+        LWIP_ASSERT("pcb->snd_queuelen >= pbuf_clen(next->p)", (pcb->snd_queuelen >= pbuf_clen(next->p)));
+        /* Prevent ACK for FIN to generate a sent event */
+        if ((pcb->acked != 0) && ((TCPH_FLAGS(next->tcphdr) & TCP_FIN) != 0)) {
+          pcb->acked--;
+        }
+
+        pcb->snd_queuelen -= pbuf_clen(next->p);
+        tcp_tx_seg_free(pcb, next);
+        LWIP_DEBUGF(TCP_QLEN_DEBUG, ("%"U32_F" (after freeing unacked)\n", (u32_t)pcb->snd_queuelen));
+      }
+      /* If there's nothing left to acknowledge, stop the retransmit
+         timer, otherwise reset it to start again */
+      if(pcb->unacked == NULL) {
+        if (persist) {
+          /* start persist timer */
+          pcb->persist_cnt = 0;
+          pcb->persist_backoff = 1;
+        }
+        pcb->rtime = -1;
+      } else {
+        pcb->rtime = 0;
+      }
+
+#endif
+
+
     } else if (TCP_SEQ_BETWEEN(in_data->ackno, pcb->lastack+1, pcb->snd_nxt)){
       /* We come here when the ACK acknowledges new data. */
 
@@ -1004,8 +1139,11 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
       pcb->nrtx = 0;
 
       /* Reset the retransmission time-out. */
-      pcb->rto = (pcb->sa >> 3) + pcb->sv;
-
+      pcb->rto = MAX((pcb->sa >> 3) + pcb->sv, pcb->minrto);
+      #if LWIP_DEBUG_RTO
+      extern u32_t slow_tmr_interval;
+      DEBUG_RTO_LOG(pcb, pcb->rto * slow_tmr_interval);
+      #endif
       /* Update the send buffer space. Diff between the two can never exceed 64K? */
       pcb->acked = (u32_t)(in_data->ackno - pcb->lastack);
 
@@ -1019,7 +1157,12 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
          ssthresh). */
       if (get_tcp_state(pcb) >= ESTABLISHED) {
 #if TCP_CC_ALGO_MOD
-	 cc_ack_received(pcb, CC_ACK);
+#if LWIP_DCTCP
+        if (!dctcp_reduce_cwnd(pcb))
+	        cc_ack_received(pcb, CC_ACK);
+#else
+        cc_ack_received(pcb, CC_ACK);
+#endif
 #else
         if (pcb->cwnd < pcb->ssthresh) {
           if ((u32_t)(pcb->cwnd + pcb->mss) > pcb->cwnd) {
@@ -1045,20 +1188,20 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
       /* Remove segment from the unacknowledged list if the incoming
          ACK acknowlegdes them. */
 #if LWIP_TSO
-      while (pcb->unacked != NULL) {
+      // while (pcb->unacked != NULL) {
 
-        /* The purpose of this processing is to avoid to send again
-         * data from TSO segment that is partially acknowledged.
-         * This TSO segment was not released in tcp_receive() because
-         * input data processing releases whole acknowledged segment only.
-         */
-        if (pcb->unacked->flags & TF_SEG_OPTS_TSO) {
-            pcb->snd_queuelen -= tcp_shrink_segment(pcb, pcb->unacked, in_data->ackno);
-        }
+      //   /* The purpose of this processing is to avoid to send again
+      //    * data from TSO segment that is partially acknowledged.
+      //    * This TSO segment was not released in tcp_receive() because
+      //    * input data processing releases whole acknowledged segment only.
+      //    */
+      //   if (pcb->unacked->flags & TF_SEG_OPTS_TSO) {
+      //       pcb->snd_queuelen -= tcp_shrink_segment(pcb, pcb->unacked, in_data->ackno);
+      //   }
 
-        if (!(TCP_SEQ_LEQ(pcb->unacked->seqno + TCP_TCPLEN(pcb->unacked), in_data->ackno))) {
-          break;
-        }
+      //   if (!(TCP_SEQ_LEQ(pcb->unacked->seqno + TCP_TCPLEN(pcb->unacked), in_data->ackno))) {
+      //     break;
+      //   }
 #else
       while (pcb->unacked != NULL &&
              TCP_SEQ_LEQ(pcb->unacked->seqno + TCP_TCPLEN(pcb->unacked), in_data->ackno)) {
@@ -1098,6 +1241,50 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
       pcb->polltmr = 0;
     } else {
       /* Out of sequence ACK, didn't really ack anything */
+
+      
+// #if LWIP_TCP_TLT
+//       /* Remove segment from the unacknowledged list if the incoming
+//          ACK acknowlegdes them. */
+// #if LWIP_TSO
+//       #error("NOT implemented")
+// #else
+//       while (pcb->unacked != NULL &&
+//              TCP_SEQ_LEQ(pcb->unacked->seqno + TCP_TCPLEN(pcb->unacked), in_data->ackno)) {
+// #endif /* LWIP_TSO */
+//         LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_receive: removing %"U32_F":%"U32_F" from pcb->unacked\n",
+//                                       ntohl(pcb->unacked->tcphdr->seqno),
+//                                       ntohl(pcb->unacked->tcphdr->seqno) +
+//                                       TCP_TCPLEN(pcb->unacked)));
+
+//         next = pcb->unacked;
+//         pcb->unacked = pcb->unacked->next;
+//         LWIP_DEBUGF(TCP_QLEN_DEBUG, ("tcp_receive: queuelen %"U32_F" ... ", (u32_t)pcb->snd_queuelen));
+//         LWIP_ASSERT("pcb->snd_queuelen >= pbuf_clen(next->p)", (pcb->snd_queuelen >= pbuf_clen(next->p)));
+//         /* Prevent ACK for FIN to generate a sent event */
+//         if ((pcb->acked != 0) && ((TCPH_FLAGS(next->tcphdr) & TCP_FIN) != 0)) {
+//           pcb->acked--;
+//         }
+
+//         pcb->snd_queuelen -= pbuf_clen(next->p);
+//         tcp_tx_seg_free(pcb, next);
+//         LWIP_DEBUGF(TCP_QLEN_DEBUG, ("%"U32_F" (after freeing unacked)\n", (u32_t)pcb->snd_queuelen));
+//       }
+//       /* If there's nothing left to acknowledge, stop the retransmit
+//          timer, otherwise reset it to start again */
+//       if(pcb->unacked == NULL) {
+//         if (persist) {
+//           /* start persist timer */
+//           pcb->persist_cnt = 0;
+//           pcb->persist_backoff = 1;
+//         }
+//         pcb->rtime = -1;
+//       } else {
+//         pcb->rtime = 0;
+//       }
+
+// #endif
+
       pcb->acked = 0;
       tcp_send_empty_ack(pcb);
     }
@@ -1151,7 +1338,6 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
       pcb->t_rttupdated++;
 #endif
       m = (s16_t)(tcp_ticks - pcb->rttest);
-
       LWIP_DEBUGF(TCP_RTO_DEBUG, ("tcp_receive: experienced rtt %"U16_F" ticks (%"U16_F" msec).\n",
                                   m, m * slow_tmr_interval));
 
@@ -1163,11 +1349,17 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
       }
       m = m - (pcb->sv >> 2);
       pcb->sv += m;
-      pcb->rto = (pcb->sa >> 3) + pcb->sv;
+      pcb->rto = MAX((pcb->sa >> 3) + pcb->sv, pcb->minrto);
 
       LWIP_DEBUGF(TCP_RTO_DEBUG, ("tcp_receive: RTO %"U16_F" (%"U16_F" milliseconds)\n",
                                   pcb->rto, pcb->rto * slow_tmr_interval));
-
+      
+      #if LWIP_DEBUG_RTO
+      extern u32_t slow_tmr_interval;
+      DEBUG_RTO_LOG(pcb, pcb->rto * slow_tmr_interval);
+      #endif
+      // printf("WARNING: RTO - RTO %"U16_F" (%"U16_F" milliseconds)\n",
+      //                             pcb->rto, pcb->rto * slow_tmr_interval);
       pcb->rttest = 0;
     }
   }
@@ -1430,17 +1622,159 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
         }
 #endif /* TCP_QUEUE_OOSEQ */
 
+#if LWIP_TCP_SACK
+        /* Here remove ACKed SACK blocks */
+        if (pcb->sack_permitted && pcb->rcv_sack_block_cnt) {
+          int sb_new_cnt = 0;
+          struct tcp_sack_block sb_new[LWIP_TCP_SACK_BLOCK_LEN];
+          memset(sb_new, 0, sizeof(sb_new));
+          for(int i=0; i< pcb->rcv_sack_block_cnt; i++) {
+            if(TCP_SEQ_LEQ(pcb->rcv_sack_block[i].block_re, pcb->rcv_sack_block[i].block_le)) {
+              /* discard */
+              continue;
+            }
+            if (TCP_SEQ_LEQ(pcb->rcv_sack_block[i].block_re, pcb->rcv_nxt)) {
+              /* discard received */
+            } else if (TCP_SEQ_LEQ(pcb->rcv_sack_block[i].block_le, pcb->rcv_nxt) && TCP_SEQ_LT(pcb->rcv_nxt, pcb->rcv_sack_block[i].block_re)) {
+              /* discard front section */
+              sb_new[sb_new_cnt].block_le = pcb->rcv_nxt;
+              sb_new[sb_new_cnt].block_re = pcb->rcv_sack_block[i].block_re;
+              sb_new_cnt++;
+            } else {
+              /* keep rest */
+              sb_new[sb_new_cnt] = pcb->rcv_sack_block[i];
+              sb_new_cnt++;
+            }
+            LWIP_ASSERT("The number of element must be less than LWIP_TCP_SACK_BLOCK_LEN", sb_new_cnt <= LWIP_TCP_SACK_BLOCK_LEN);
+          }
+          memcpy(pcb->rcv_sack_block, sb_new, sizeof(sb_new));
+          pcb->rcv_sack_block_cnt = sb_new_cnt;
+        }
+        
+#endif /* LWIP_TCP_SACK */
 
         /* Acknowledge the segment(s). */
+#if LWIP_TCP_TLT
+        LWIP_UNUSED_ARG(tcp_quickack);
+        tcp_ack_now(pcb);
+#else
         if ((in_data->recv_data && in_data->recv_data->next) || tcp_quickack(pcb, in_data)) {
         	tcp_ack_now(pcb);
         } else {
         	tcp_ack(pcb);
         }
-
+#endif
       } else {
         /* We get here if the incoming segment is out-of-sequence. */
-        tcp_send_empty_ack(pcb);
+#if (LWIP_TCP_SACK && 0)
+        /* Here add ACKed SACK blocks */
+        DEBUG_TLT_SACK("Out-of-sequence detected");
+        DEBUG_TLT_SACK("===== Current SACK Entries =====");
+        for(int i=0; i<pcb->rcv_sack_block_cnt; i++) {
+          DEBUG_TLT_SACK("SACK Entry #%d : %u - %u", i, pcb->rcv_sack_block[i].block_le, pcb->rcv_sack_block[i].block_re);
+        }
+        DEBUG_TLT_SACK("SACK Handling seq : %u - %u", in_data->seqno, in_data->seqno+in_data->tcplen);
+        if (pcb->sack_permitted) {
+          int sb_new_cnt = 0;
+          struct tcp_sack_block sb_new[LWIP_TCP_SACK_BLOCK_LEN];
+          memset(sb_new, 0, sizeof(sb_new));
+          u32_t cur_le = in_data->seqno;
+          u32_t cur_re = in_data->seqno + in_data->tcplen;
+
+          u32_t window_r = pcb->rcv_nxt + (u32_t)pcb->rcv_wnd;
+          /* Check if block does not exceed window */
+          if (TCP_SEQ_LT(window_r, cur_le) && TCP_SEQ_LT(window_r, cur_re)) {
+            cur_re = cur_le; /* do not append if entire block is out of receive window */
+          } else if (TCP_SEQ_LT(window_r, cur_re)) {
+            cur_re = window_r; /* receive below window */
+          }
+
+          for(int i=0; i< pcb->rcv_sack_block_cnt && sb_new_cnt < LWIP_TCP_SACK_BLOCK_LEN; i++) {
+            if (TCP_SEQ_LEQ(cur_re, cur_le)) {
+              break;
+            }
+            if (TCP_SEQ_LEQ(pcb->rcv_sack_block[i].block_re, pcb->rcv_sack_block[i].block_le)) {
+              /* discard */
+              DEBUG_TLT_SACK("SACK Case 0");
+              continue;
+            }
+            if (TCP_SEQ_LT(cur_le, pcb->rcv_sack_block[i].block_le) && TCP_SEQ_LEQ(cur_re, pcb->rcv_sack_block[i].block_le)) {
+              /* case 1 */
+              /* less than existing blocks */
+              DEBUG_TLT_SACK("SACK Case 1");
+              sb_new[sb_new_cnt].block_le = cur_le;
+              sb_new[sb_new_cnt].block_re = cur_re;
+              cur_le = cur_re;
+              sb_new_cnt++;
+              sb_new[sb_new_cnt] = pcb->rcv_sack_block[i];
+              sb_new_cnt++;
+            } else if (TCP_SEQ_LT(cur_le, pcb->rcv_sack_block[i].block_le) && TCP_SEQ_LT (pcb->rcv_sack_block[i].block_re, cur_re)) {
+              /* case 6 */
+              DEBUG_TLT_SACK("SACK Case 6");
+              sb_new[sb_new_cnt].block_le = cur_le;
+              sb_new[sb_new_cnt].block_re = pcb->rcv_sack_block[i].block_re;
+              cur_le = pcb->rcv_sack_block[i].block_re;
+              sb_new_cnt++;
+            } else if (TCP_SEQ_LT(cur_le, pcb->rcv_sack_block[i].block_le) && TCP_SEQ_LEQ(cur_re, pcb->rcv_sack_block[i].block_re)) {
+              /* case 2 */
+              DEBUG_TLT_SACK("SACK Case 2");
+              sb_new[sb_new_cnt].block_le = cur_le;
+              sb_new[sb_new_cnt].block_re = pcb->rcv_sack_block[i].block_re;
+              cur_le = cur_re;
+              sb_new_cnt++;
+            } else if (TCP_SEQ_LEQ(pcb->rcv_sack_block[i].block_le, cur_le) && TCP_SEQ_LEQ(cur_re, pcb->rcv_sack_block[i].block_re)) {
+              /* case 3 */
+              DEBUG_TLT_SACK("SACK Case 3");
+              sb_new[sb_new_cnt] = pcb->rcv_sack_block[i];
+              cur_le = cur_re;
+              sb_new_cnt++;
+            } else if (TCP_SEQ_LEQ(pcb->rcv_sack_block[i].block_le, cur_le) && TCP_SEQ_LEQ(pcb->rcv_sack_block[i].block_re, cur_re)) {
+              /* case 4 */
+              DEBUG_TLT_SACK("SACK Case 4");
+              cur_le = pcb->rcv_sack_block[i].block_re;
+              sb_new[sb_new_cnt] = pcb->rcv_sack_block[i];
+              sb_new_cnt++;
+            } else if (TCP_SEQ_LEQ(pcb->rcv_sack_block[i].block_re, cur_le)) {
+              /* case 5 */
+              DEBUG_TLT_SACK("SACK Case 5");
+              sb_new[sb_new_cnt] = pcb->rcv_sack_block[i];
+              sb_new_cnt++;
+            } else {
+              DEBUG_TLT_SACK("SACK unhandled case");
+            }
+            LWIP_ASSERT("The number of element must be less than LWIP_TCP_SACK_BLOCK_LEN", sb_new_cnt <= LWIP_TCP_SACK_BLOCK_LEN);
+          }
+          if (cur_le != cur_re && sb_new_cnt < LWIP_TCP_SACK_BLOCK_LEN) {
+            sb_new[sb_new_cnt].block_le = cur_le;
+            sb_new[sb_new_cnt].block_re = cur_re;
+            sb_new_cnt++;
+          }
+          LWIP_ASSERT("The number of element must be less than LWIP_TCP_SACK_BLOCK_LEN", sb_new_cnt <= LWIP_TCP_SACK_BLOCK_LEN);
+
+          /* Merge SACK blocks */
+          memset(pcb->rcv_sack_block, 0, sizeof(sb_new));
+          pcb->rcv_sack_block_cnt = 0;
+          for(int i=0; i < sb_new_cnt; i++) {
+            if (i == 0) {
+              pcb->rcv_sack_block[0] = sb_new[0];
+              pcb->rcv_sack_block_cnt++;
+              continue;
+            }
+            if (pcb->rcv_sack_block[pcb->rcv_sack_block_cnt-1].block_re == sb_new[i].block_le) {
+              pcb->rcv_sack_block[pcb->rcv_sack_block_cnt-1].block_re = sb_new[i].block_re;
+            } else {
+              pcb->rcv_sack_block[pcb->rcv_sack_block_cnt] = sb_new[i];
+              pcb->rcv_sack_block_cnt++;
+            }
+          }
+          
+          DEBUG_TLT_SACK("===== Updated SACK Entries =====");
+          for(int i=0; i<pcb->rcv_sack_block_cnt; i++) {
+            DEBUG_TLT_SACK("SACK Entry #%d : %u - %u", i, pcb->rcv_sack_block[i].block_le, pcb->rcv_sack_block[i].block_re);
+          }
+        }
+#endif /* LWIP_TCP_SACK */
+
 #if TCP_QUEUE_OOSEQ
         /* We queue the segment on the ->ooseq queue. */
         if (pcb->ooseq == NULL) {
@@ -1570,8 +1904,28 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
             prev = next;
           }
         }
+#if LWIP_TCP_SACK
+        /* rebuild SACK entries using OOSEQ */
+        if (pcb->sack_permitted) {
+          memset(pcb->rcv_sack_block, 0, sizeof(pcb->rcv_sack_block));
+          pcb->rcv_sack_block_cnt = 0;
+          int incomplete = 0;
+          for(struct tcp_seg *iter = pcb->ooseq; iter != NULL; iter = iter->next) {
+            if(!incomplete) {
+              pcb->rcv_sack_block[pcb->rcv_sack_block_cnt].block_le = iter->tcphdr->seqno;
+            }
+            if(iter->next == NULL || TCP_SEQ_LT(iter->tcphdr->seqno + iter->len, iter->next->tcphdr->seqno)) {
+              pcb->rcv_sack_block[pcb->rcv_sack_block_cnt].block_re = iter->tcphdr->seqno + iter->len;
+              pcb->rcv_sack_block_cnt++;
+            }
+          }
+        } else {
+          pcb->rcv_sack_block_cnt = 0;
+        }
+#endif
 #endif /* TCP_QUEUE_OOSEQ */
 
+        tcp_send_empty_ack(pcb);
       }
     } else {
       /* The incoming segment is not withing the window. */
@@ -1582,9 +1936,11 @@ tcp_receive(struct tcp_pcb *pcb, tcp_in_data* in_data)
        fall out of the window are ACKed. */
     /*if (TCP_SEQ_GT(pcb->rcv_nxt, seqno) ||
       TCP_SEQ_GEQ(seqno, pcb->rcv_nxt + pcb->rcv_wnd)) {*/
+#if !(LWIP_TCP_TLT)
     if(!TCP_SEQ_BETWEEN(in_data->seqno, pcb->rcv_nxt, pcb->rcv_nxt + pcb->rcv_wnd-1)){
       tcp_ack_now(pcb);
     }
+#endif
   }
 }
 
@@ -1605,6 +1961,11 @@ tcp_parseopt(struct tcp_pcb *pcb, tcp_in_data* in_data)
   u8_t *opts, opt;
 #if LWIP_TCP_TIMESTAMPS
   u32_t tsval;
+#endif
+
+#if LWIP_TCP_SACK
+  u8_t sack_len = 0;
+  in_data->sack_block_cnt = 0;
 #endif
 
   opts = (u8_t *)in_data->tcphdr + TCP_HLEN;
@@ -1680,6 +2041,39 @@ tcp_parseopt(struct tcp_pcb *pcb, tcp_in_data* in_data)
         }
         /* Advance to next option */
         c += 0x0A;
+        break;
+#endif
+#if LWIP_TCP_SACK
+      case 0x04:
+        c += 2;
+        /* RFC 2018 Sack-Permitted Option */
+        if (in_data->flags & TCP_SYN)
+          pcb->sack_permitted = 1;
+        break;
+      case 0x05:
+        sack_len = opts[c+1];
+        if(sack_len >= 10) {
+          sack_len = (sack_len - 2) >> 3;
+          LWIP_ASSERT("The number of SACK blocks must be <= 4", sack_len <= 4);
+          c += 2;
+          in_data->sack_block_cnt = 0;
+          while(sack_len) {
+            LWIP_ASSERT("SACK blocks invalid", c + 8 <= max_c);
+            if(c+8> max_c) {
+              DEBUG_TLT_SACK("SACK blocks invalid");
+            }
+            in_data->sack_block[in_data->sack_block_cnt].block_le = lwip_ntohl((opts[c]) | (opts[c+1] << 8) | (opts[c+2] << 16) | (opts[c+3] << 24));
+            in_data->sack_block[in_data->sack_block_cnt].block_re = lwip_ntohl((opts[c+4]) | (opts[c+5] << 8) | (opts[c+6] << 16) | (opts[c+7] << 24));
+            in_data->sack_block_cnt++;
+            c += 8;
+            sack_len--;
+          }
+        } else {
+          /* Invalid */
+          DEBUG_TLT_SACK("SACK option invalid");
+          c += sack_len;
+        }
+        
         break;
 #endif
       default:

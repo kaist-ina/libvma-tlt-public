@@ -112,7 +112,7 @@ void             set_tmr_resolution(u32_t v);
 #define TCP_ECE 0x40U
 #define TCP_CWR 0x80U
 
-#define TCP_FLAGS 0x3fU
+#define TCP_FLAGS 0xffU
 
 /* Length of the TCP header, excluding options. */
 #define TCP_HLEN 20
@@ -305,6 +305,9 @@ struct tcp_seg {
 #define TF_SEG_OPTS_WNDSCALE	(u8_t)0x08U /* Include window scaling option */
 #define TF_SEG_OPTS_DUMMY_MSG	(u8_t)TCP_WRITE_DUMMY /* Include dummy send option */
 #define TF_SEG_OPTS_TSO         (u8_t)TCP_WRITE_TSO /* Use TSO send mode */
+#define TF_SEG_OPTS_SACK_PERM   (u8_t)0x40U /* SACK_PERM */
+
+  u8_t tos; /* copy tos */
 
   struct tcp_hdr *tcphdr;  /* the TCP header */
 };
@@ -318,11 +321,26 @@ struct tcp_seg {
 /* This macro calculates total length of tcp additional options
  * basing on option flags
  */
-#define LWIP_TCP_OPT_LENGTH(flags)                    \
+#define LWIP_TCP_OPT_LENGTH_LEGACY(flags)                    \
 		  (flags & TF_SEG_OPTS_MSS ? 4  : 0) +        \
 		  (flags & TF_SEG_OPTS_WNDSCALE  ? 1+3 : 0) + \
-		  (flags & TF_SEG_OPTS_TS  ? 12 : 0)
+		  (flags & TF_SEG_OPTS_TS  ? 12 : 0) + \
+      (flags & TF_SEG_OPTS_SACK_PERM ? 4 : 0)
 
+#ifndef MAX
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+#ifndef MIN
+#define MIN(a, b) (((a) > (b)) ? (b) : (a))
+#endif
+
+#if LWIP_TCP_SACK
+#define LWIP_TCP_OPT_LENGTH(pcb, flags) \
+      (( !(flags & TF_SEG_OPTS_SACK_PERM) && (pcb)->sack_permitted && (pcb)->rcv_sack_block_cnt && (LWIP_TCP_OPT_LENGTH_LEGACY(flags) <= 28)) ? \
+        (MIN(40, (LWIP_TCP_OPT_LENGTH_LEGACY(flags))+((pcb)->rcv_sack_block_cnt << 3)+4)) : LWIP_TCP_OPT_LENGTH_LEGACY(flags))
+#else
+#define LWIP_TCP_OPT_LENGTH(pcb, flags) (LWIP_TCP_OPT_LENGTH_LEGACY(flags))
+#endif
 /* This macro calculates total length of tcp header including
  * additional options
  */

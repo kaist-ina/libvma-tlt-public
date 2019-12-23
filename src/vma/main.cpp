@@ -76,13 +76,15 @@
 #include "vma/util/instrumentation.h"
 #include "vma/util/agent.h"
 
+#include "vma/lwip/opt.h"
+
 void check_netperf_flags();
 
 
 // Start of vma_version_str - used in "$ strings libvma.so | grep VMA_VERSION"
 #define STR_EXPAND(x) #x
 #define STR(x) STR_EXPAND(x)
-const char *vma_version_str = "VMA_VERSION: " PACKAGE_VERSION "-" STR(VMA_LIBRARY_RELEASE)
+const char *vma_version_str = "VMA_VERSION: " PACKAGE_VERSION "-" STR(VMA_LIBRARY_RELEASE) "-TLTdev"
 
 #if _BullseyeCoverage
 			      " Bullseye"
@@ -376,6 +378,28 @@ void print_vma_global_settings()
 		vlog_printf(log_level,"Node: %s\n", sys_info.nodename);
 	}
 
+	vlog_printf(VLOG_INFO, "************************************************************************\n");
+	vlog_printf(VLOG_INFO, "** Current running libvma modified for TLT.\n");
+#if LWIP_TCP_TLT
+	vlog_printf(VLOG_INFO, "** TLT Status : Enabled\n");
+#else
+	vlog_printf(VLOG_INFO, "** TLT Status : Disabled\n");
+#endif
+
+#if LWIP_DCTCP
+	vlog_printf(VLOG_INFO, "** DCTCP status: Enabled\n");
+#else
+	vlog_printf(VLOG_INFO, "** DCTCP Status : Disabled\n");
+#endif
+
+
+#if TIMER_US_GRAN
+	vlog_printf(VLOG_INFO, "** Timer Granularity : %d us  (TCP %d us)\n",  safe_mce_sys().timer_resolution_usec,  safe_mce_sys().tcp_timer_resolution_usec);
+#else
+	vlog_printf(VLOG_INFO, "** Timer Granularity : %d ms  (TCP %d ms)\n",  safe_mce_sys().timer_resolution_msec,  safe_mce_sys().tcp_timer_resolution_msec);
+#endif
+	vlog_printf(VLOG_INFO, "************************************************************************\n");
+
 	vlog_printf(VLOG_INFO,"---------------------------------------------------------------------------\n");
 
 	if (safe_mce_sys().mce_spec != MCE_SPEC_NONE) {
@@ -523,8 +547,13 @@ void print_vma_global_settings()
 	VLOG_PARAM_STRING("CQ Keeps QP Full", safe_mce_sys().cq_keep_qp_full, MCE_DEFAULT_CQ_KEEP_QP_FULL, SYS_VAR_CQ_KEEP_QP_FULL, safe_mce_sys().cq_keep_qp_full ? "Enabled" : "Disabled");
 	VLOG_PARAM_NUMBER("QP Compensation Level", safe_mce_sys().qp_compensation_level, MCE_DEFAULT_QP_COMPENSATION_LEVEL, SYS_VAR_QP_COMPENSATION_LEVEL);
 	VLOG_PARAM_STRING("Offloaded Sockets", safe_mce_sys().offloaded_sockets, MCE_DEFAULT_OFFLOADED_SOCKETS, SYS_VAR_OFFLOADED_SOCKETS, safe_mce_sys().offloaded_sockets ? "Enabled" : "Disabled");
+#if TIMER_US_GRAN
+	VLOG_PARAM_NUMBER("Timer Resolution (usec)", safe_mce_sys().timer_resolution_usec, MCE_DEFAULT_TIMER_RESOLUTION_USEC, SYS_VAR_TIMER_RESOLUTION_USEC);
+	VLOG_PARAM_NUMBER("TCP Timer Resolution (usec)", safe_mce_sys().tcp_timer_resolution_usec, MCE_DEFAULT_TCP_TIMER_RESOLUTION_USEC, SYS_VAR_TCP_TIMER_RESOLUTION_USEC);
+#else
 	VLOG_PARAM_NUMBER("Timer Resolution (msec)", safe_mce_sys().timer_resolution_msec, MCE_DEFAULT_TIMER_RESOLUTION_MSEC, SYS_VAR_TIMER_RESOLUTION_MSEC);
 	VLOG_PARAM_NUMBER("TCP Timer Resolution (msec)", safe_mce_sys().tcp_timer_resolution_msec, MCE_DEFAULT_TCP_TIMER_RESOLUTION_MSEC, SYS_VAR_TCP_TIMER_RESOLUTION_MSEC);
+#endif
 	VLOG_PARAM_NUMSTR("TCP control thread", safe_mce_sys().tcp_ctl_thread, MCE_DEFAULT_TCP_CTL_THREAD, SYS_VAR_TCP_CTL_THREAD, ctl_thread_str(safe_mce_sys().tcp_ctl_thread));
 	VLOG_PARAM_NUMBER("TCP timestamp option", safe_mce_sys().tcp_ts_opt, MCE_DEFAULT_TCP_TIMESTAMP_OPTION, SYS_VAR_TCP_TIMESTAMP_OPTION);
 	VLOG_PARAM_NUMBER("TCP nodelay", safe_mce_sys().tcp_nodelay, MCE_DEFAULT_TCP_NODELAY, SYS_VAR_TCP_NODELAY);
@@ -728,7 +757,11 @@ static void do_global_ctors_helper()
 
  	NEW_CTOR(g_tcp_seg_pool,  tcp_seg_pool(safe_mce_sys().tx_num_segs_tcp));
 
+#if TIMER_US_GRAN
+ 	NEW_CTOR(g_tcp_timers_collection, tcp_timers_collection(safe_mce_sys().tcp_timer_resolution_usec, safe_mce_sys().timer_resolution_usec));
+#else
  	NEW_CTOR(g_tcp_timers_collection, tcp_timers_collection(safe_mce_sys().tcp_timer_resolution_msec, safe_mce_sys().timer_resolution_msec));
+#endif
 
 	NEW_CTOR(g_p_vlogger_timer_handler, vlogger_timer_handler()); 
 

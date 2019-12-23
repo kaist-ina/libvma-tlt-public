@@ -509,6 +509,8 @@ bool sockinfo_tcp::prepare_to_close(bool process_shutdown /* = false */)
 	 */
 	if (get_tcp_state(&m_pcb) != LISTEN &&
 		(process_shutdown || (m_linger.l_onoff && !m_linger.l_linger))) {
+		// printf("Aborting connection: state=%d, proc_shutdown=%d, m_syn_received-empty=%d, m_accepted_conns-empty=%d\n",
+		//  get_tcp_state(&m_pcb), process_shutdown, m_syn_received.empty(), m_accepted_conns.empty());
 		abort_connection();
 	} else {
 		tcp_close(&m_pcb);
@@ -693,7 +695,7 @@ bool sockinfo_tcp::check_dummy_send_conditions(const int flags, const iovec* p_i
 		}
 	#endif /* LWIP_TCP_TIMESTAMPS */
 
-	u16_t max_len = mss_local - LWIP_TCP_OPT_LENGTH(optflags);
+	u16_t max_len = mss_local - LWIP_TCP_OPT_LENGTH(&m_pcb, optflags);
 
 	// Calculate window size
 	u32_t wnd = MIN(m_pcb.snd_wnd, m_pcb.cwnd);
@@ -961,7 +963,7 @@ tx_packet_to_os:
 }
 
 #ifdef DEFINED_TSO
-err_t sockinfo_tcp::ip_output(struct pbuf *p, void* v_p_conn, uint16_t flags)
+err_t sockinfo_tcp::ip_output(struct pbuf *p, void* v_p_conn, uint16_t flags, u8_t tos)
 {
 	sockinfo_tcp *p_si_tcp = (sockinfo_tcp *)(((struct tcp_pcb*)v_p_conn)->my_container);
 	dst_entry *p_dst = p_si_tcp->m_p_connected_dst_entry;
@@ -975,6 +977,7 @@ err_t sockinfo_tcp::ip_output(struct pbuf *p, void* v_p_conn, uint16_t flags)
 		lwip_iovec[count].iovec.iov_base = p->payload;
 		lwip_iovec[count].iovec.iov_len = p->len;
 		lwip_iovec[count].p_desc = (mem_buf_desc_t*)p;
+		lwip_iovec[count].p_tos = tos;
 		p = p->next;
 		count++;
 	}
@@ -1004,7 +1007,7 @@ err_t sockinfo_tcp::ip_output(struct pbuf *p, void* v_p_conn, uint16_t flags)
 	return ERR_OK;
 }
 
-err_t sockinfo_tcp::ip_output_syn_ack(struct pbuf *p, void* v_p_conn, uint16_t flags)
+err_t sockinfo_tcp::ip_output_syn_ack(struct pbuf *p, void* v_p_conn, uint16_t flags, u8_t tos)
 {
 	iovec iovec[64];
 	struct iovec* p_iovec = iovec;
@@ -1020,6 +1023,7 @@ err_t sockinfo_tcp::ip_output_syn_ack(struct pbuf *p, void* v_p_conn, uint16_t f
 		tcp_iovec_temp.iovec.iov_base = p->payload;
 		tcp_iovec_temp.iovec.iov_len = p->len;
 		tcp_iovec_temp.p_desc = (mem_buf_desc_t*)p;
+		tcp_iovec_temp.p_tos = tos;
 		__log_dbg("p_desc=%p,p->len=%d ", p, p->len);
 		p_iovec = (struct iovec*)&tcp_iovec_temp;
 	} else {
@@ -1045,7 +1049,7 @@ err_t sockinfo_tcp::ip_output_syn_ack(struct pbuf *p, void* v_p_conn, uint16_t f
 	return ERR_OK;
 }
 #else
-err_t sockinfo_tcp::ip_output(struct pbuf *p, void* v_p_conn, int is_rexmit, uint8_t is_dummy)
+err_t sockinfo_tcp::ip_output(struct pbuf *p, void* v_p_conn, int is_rexmit, uint8_t is_dummy, u8_t tos)
 {
 	iovec iovec[64];
 	struct iovec* p_iovec = iovec;
@@ -1058,6 +1062,7 @@ err_t sockinfo_tcp::ip_output(struct pbuf *p, void* v_p_conn, int is_rexmit, uin
 		tcp_iovec_temp.iovec.iov_base = p->payload;
 		tcp_iovec_temp.iovec.iov_len = p->len;
 		tcp_iovec_temp.p_desc = (mem_buf_desc_t*)p;
+		tcp_iovec_temp.p_tos = tos;
 		p_iovec = (struct iovec*)&tcp_iovec_temp;
 	} else {
 		for (count = 0; count < 64 && p; ++count) {
@@ -1090,7 +1095,7 @@ err_t sockinfo_tcp::ip_output(struct pbuf *p, void* v_p_conn, int is_rexmit, uin
 	return ERR_OK;
 }
 
-err_t sockinfo_tcp::ip_output_syn_ack(struct pbuf *p, void* v_p_conn, int is_rexmit, uint8_t is_dummy)
+err_t sockinfo_tcp::ip_output_syn_ack(struct pbuf *p, void* v_p_conn, int is_rexmit, uint8_t is_dummy, u8_t tos)
 {
 	NOT_IN_USE(is_dummy);
 
@@ -1107,6 +1112,7 @@ err_t sockinfo_tcp::ip_output_syn_ack(struct pbuf *p, void* v_p_conn, int is_rex
 		tcp_iovec_temp.iovec.iov_base = p->payload;
 		tcp_iovec_temp.iovec.iov_len = p->len;
 		tcp_iovec_temp.p_desc = (mem_buf_desc_t*)p;
+		tcp_iovec_temp.p_tos = tos;
 		__log_dbg("p_desc=%p,p->len=%d ", p, p->len);
 		p_iovec = (struct iovec*)&tcp_iovec_temp;
 	} else {
@@ -1955,7 +1961,11 @@ ssize_t sockinfo_tcp::rx(const rx_call_t call_type, iovec* p_iov, ssize_t sz_iov
 void sockinfo_tcp::register_timer()
 {
 	if( m_timer_handle == NULL) {
+#if TIMER_US_GRAN
+		m_timer_handle = g_p_event_handler_manager->register_timer_event_us(safe_mce_sys().tcp_timer_resolution_usec , this, PERIODIC_TIMER, 0, g_tcp_timers_collection);
+#else
 		m_timer_handle = g_p_event_handler_manager->register_timer_event(safe_mce_sys().tcp_timer_resolution_msec , this, PERIODIC_TIMER, 0, g_tcp_timers_collection);
+#endif
 	}else {
 		si_tcp_logdbg("register_timer was called more than once. Something might be wrong, or connect was called twice.");
 	}
@@ -2490,8 +2500,11 @@ int sockinfo_tcp::listen(int backlog)
 	BULLSEYE_EXCLUDE_BLOCK_END
 
 	if (m_sysvar_tcp_ctl_thread > CTL_THREAD_DISABLE)
+#if TIMER_US_GRAN
+		m_timer_handle = g_p_event_handler_manager->register_timer_event_us(safe_mce_sys().timer_resolution_usec , this, PERIODIC_TIMER, 0, NULL);
+#else
 		m_timer_handle = g_p_event_handler_manager->register_timer_event(safe_mce_sys().timer_resolution_msec , this, PERIODIC_TIMER, 0, NULL);
-
+#endif
 	unlock_tcp_con();
 	return 0;
 
@@ -4692,7 +4705,11 @@ void tcp_timers_collection::add_new_timer(timer_node_t* node, timer_handler* han
 	m_n_next_insert_bucket = (m_n_next_insert_bucket + 1) % m_n_intervals_size;
 
 	if (m_n_count == 0) {
+#if TIMER_US_GRAN
+		m_timer_handle = g_p_event_handler_manager->register_timer_event_us(m_n_resolution , this, PERIODIC_TIMER, NULL);
+#else
 		m_timer_handle = g_p_event_handler_manager->register_timer_event(m_n_resolution , this, PERIODIC_TIMER, NULL);
+#endif
 	}
 	m_n_count++;
 

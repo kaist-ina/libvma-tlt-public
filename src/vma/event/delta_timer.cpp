@@ -76,13 +76,25 @@ timer::~timer()
 		free(to_free);
 	}
 }
-
+#if TIMER_US_GRAN
 void timer::add_new_timer(unsigned int timeout_msec, timer_node_t* node, timer_handler* handler, void* user_data, timer_req_type_t req_type)
+{
+	this->add_new_timer_us(((unsigned long)timeout_msec)*1000UL, node, handler, user_data, req_type);
+}
+
+void timer::add_new_timer_us(unsigned long timeout_usec, timer_node_t* node, timer_handler* handler, void* user_data, timer_req_type_t req_type)
+#else
+void timer::add_new_timer(unsigned int timeout_msec, timer_node_t* node, timer_handler* handler, void* user_data, timer_req_type_t req_type)
+#endif
 {
 	node->handler = handler;
 	node->req_type = req_type;
 	node->user_data = user_data;
+#if TIMER_US_GRAN
+	node->orig_time_usec = timeout_usec;
+#else
 	node->orig_time_msec = timeout_msec;
+#endif
 
 	BULLSEYE_EXCLUDE_BLOCK_START
 	if (IS_NODE_INVALID(node)) {
@@ -105,10 +117,17 @@ void timer::wakeup_timer(timer_node_t* node)
 
 	remove_from_list(node);
 
+#if TIMER_US_GRAN
+	unsigned int orig_time = node->orig_time_usec;
+	node->orig_time_usec = 0;
+	insert_to_list(node);
+	node->orig_time_usec = orig_time;
+#else
 	unsigned int orig_time = node->orig_time_msec;
 	node->orig_time_msec = 0;
 	insert_to_list(node);
 	node->orig_time_msec = orig_time;
+#endif
 
 	return;
 }
@@ -175,10 +194,17 @@ void timer::remove_all_timers(timer_handler *handler)
 
 	return;
 }
-
+#if TIMER_US_GRAN
+long timer::update_timeout()
+#else
 int timer::update_timeout()
+#endif
 {
+#if TIMER_US_GRAN
+	long ret = 0, delta_usec = 0;
+#else
 	int ret = 0, delta_msec = 0;
+#endif
 	timer_node_t* list_tmp = NULL;
 	struct timespec ts_now, ts_delta;
 
@@ -191,21 +217,52 @@ int timer::update_timeout()
 	BULLSEYE_EXCLUDE_BLOCK_END
 	// Find difference (subtract)
 	ts_sub(&ts_now, &m_ts_last, &ts_delta);
+#if TIMER_US_GRAN
+	delta_usec = ts_to_usec(&ts_delta);
+#else 
 	delta_msec = ts_to_msec(&ts_delta);
+#endif
 
 	// Save 'now' as 'last'
+#if TIMER_US_GRAN
+	if (delta_usec > 0)
+		m_ts_last = ts_now;
+#else
 	if (delta_msec > 0)
 		m_ts_last = ts_now;
+#endif
 
 	// empty list -> unlimited timeout
 	if (!m_list_head) {
+#if TIMER_US_GRAN
+		tmr_logfunc("elapsed time: %ld usec", delta_usec);
+#else
 		tmr_logfunc("elapsed time: %d msec", delta_msec);
+#endif
 		ret = INFINITE_TIMEOUT;
 		goto out;
 	}
 
 	// Check for timeout!
 	list_tmp = m_list_head;
+
+	
+#if TIMER_US_GRAN
+	while (delta_usec > 0 && list_tmp) {
+		tmr_logfuncall("updating list node %p with elapsed time: %ld usec", list_tmp, delta_usec);
+		if ((int) list_tmp->delta_time_usec > delta_usec) {
+			list_tmp->delta_time_usec -= delta_usec;
+			break;
+		}
+		else {
+			delta_usec -= list_tmp->delta_time_usec;
+			list_tmp->delta_time_usec = 0;
+		}
+		list_tmp = list_tmp->next;
+	}
+
+	ret = m_list_head->delta_time_usec;
+#else
 	while (delta_msec > 0 && list_tmp) {
 		tmr_logfuncall("updating list node %p with elapsed time: %d msec", list_tmp, delta_msec);
 		if ((int) list_tmp->delta_time_msec > delta_msec) {
@@ -220,9 +277,15 @@ int timer::update_timeout()
 	}
 
 	ret = m_list_head->delta_time_msec;
+#endif
 
 out:
+
+#if TIMER_US_GRAN
+	tmr_logfuncall("next timeout: %ld usec", ret);
+#else
 	tmr_logfuncall("next timeout: %d msec", ret);
+#endif
 	return ret;
 }
 
@@ -230,7 +293,13 @@ void timer::process_registered_timers()
 {
 	timer_node_t* iter = m_list_head;
 	timer_node_t* next_iter;
-	while (iter && (iter->delta_time_msec == 0)) {
+	
+#if TIMER_US_GRAN
+	while (iter && (iter->delta_time_usec == 0)) 	
+#else
+	while (iter && (iter->delta_time_msec == 0)) 
+#endif
+	{
 		tmr_logfuncall("timer expired on %p", iter->handler);
 
 		/* Special check is need to protect
@@ -273,19 +342,55 @@ void timer::process_registered_timers()
 // insert allocated node to the list
 void timer::insert_to_list(timer_node_t* new_node)
 {
+#if TIMER_US_GRAN
+	unsigned long tmp_delta;
+#else
 	unsigned int tmp_delta;
+#endif
 	timer_node_t* iter;
 	timer_node_t* prev;
 
 	if (!m_list_head) { // first node in the list
+#if TIMER_US_GRAN
+		new_node->delta_time_usec = new_node->orig_time_usec; // time from now
+#else
 		new_node->delta_time_msec = new_node->orig_time_msec; // time from now
+#endif
 		new_node->next = NULL;
 		new_node->prev = NULL;
 		m_list_head = new_node;
 		tmr_logfuncall("insert first node to list (handler %p, timer %d, delta time %d)", new_node->handler, new_node->orig_time_msec, new_node->delta_time_msec);
 		return;
 	}
-	// else: need to find the correct place in the list
+	// else: need to find the correct place in the listin the list
+#if TIMER_US_GRAN
+	tmp_delta = new_node->orig_time_usec;
+	iter = m_list_head;
+	prev = NULL;
+
+	while (iter && tmp_delta >= iter->delta_time_usec) {
+		tmp_delta = tmp_delta - iter->delta_time_usec;
+		prev = iter;
+		iter = iter->next;
+	}
+
+	new_node->delta_time_usec = tmp_delta;
+	new_node->next = iter;
+	new_node->prev = prev;
+	if (prev) {
+		prev->next = new_node;
+	}
+	else { // first node in the list
+		m_list_head = new_node;   
+	}
+	// update the delta time for the next element
+	if (new_node->next) {
+		new_node->next->delta_time_usec = new_node->next->delta_time_usec - new_node->delta_time_usec;
+		new_node->next->prev = new_node;
+	}
+	tmr_logfuncall("insert new node to list  (handler %p, timer %ld, delta time %ld)", new_node->handler, new_node->orig_time_usec, new_node->delta_time_usec);
+#else
+
 	tmp_delta = new_node->orig_time_msec;
 	iter = m_list_head;
 	prev = NULL;
@@ -311,6 +416,7 @@ void timer::insert_to_list(timer_node_t* new_node)
 		new_node->next->prev = new_node;
 	}
 	tmr_logfuncall("insert new node to list  (handler %p, timer %d, delta time %d)", new_node->handler, new_node->orig_time_msec, new_node->delta_time_msec);
+#endif
 }
 
 // remove timer from list (without free)
@@ -325,7 +431,11 @@ void timer::remove_from_list(timer_node_t* node)
 		m_list_head = node->next; 
 	}
 	if (node->next) { // not the last element in list
+#if TIMER_US_GRAN
+		node->next->delta_time_usec = node->next->delta_time_usec + node->delta_time_usec;
+#else
 		node->next->delta_time_msec = node->next->delta_time_msec + node->delta_time_msec;
+#endif
 		node->next->prev = node->prev;
 	}
 	tmr_logfuncall("removed node from list (handler %p, timer %d, delta time %d)", node->handler, node->orig_time_msec, node->delta_time_msec);

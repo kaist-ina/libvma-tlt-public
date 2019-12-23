@@ -47,10 +47,15 @@
 #include "vma/lwip/tcp.h"
 #include "vma/lwip/tcp_impl.h"
 #include "vma/lwip/stats.h"
+#include "custom.h"
 
 #include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#if LWIP_TCP_TLT
+#include "vma/lwip/tlt.h"
+#endif
 
 #if LWIP_3RD_PARTY_BUFS
 tcp_tx_pbuf_alloc_fn external_tcp_tx_pbuf_alloc;
@@ -97,7 +102,7 @@ u16_t lwip_tcp_mss = CONST_TCP_MSS;
 
 u8_t enable_ts_option = 0;
 /* slow timer value */
-static u32_t slow_tmr_interval;
+u32_t slow_tmr_interval;
 /* Incremented every coarse grained timer shot (typically every slow_tmr_interval ms). */
 u32_t tcp_ticks = 0;
 const u8_t tcp_backoff[13] =
@@ -585,7 +590,7 @@ tcp_connect(struct tcp_pcb *pcb, ip_addr_t *ipaddr, u16_t port,
   if (pcb->local_port == 0) {
     return ERR_VAL;
   }
-  iss = tcp_next_iss();
+  iss = 1; //tcp_next_iss();
   pcb->rcv_nxt = 0;
   pcb->snd_nxt = iss;
   pcb->lastack = iss - 1;
@@ -700,7 +705,8 @@ tcp_slowtmr(struct tcp_pcb* pcb)
 		  /* Double retransmission time-out unless we are trying to
 		   * connect to somebody (i.e., we are in SYN_SENT). */
 		  if (get_tcp_state(pcb) != SYN_SENT) {
-			pcb->rto = ((pcb->sa >> 3) + pcb->sv) << tcp_backoff[pcb->nrtx];
+			pcb->rto = MAX(((pcb->sa >> 3) + pcb->sv) << tcp_backoff[pcb->nrtx], pcb->minrto);
+      DEBUG_RTO_LOG(pcb, pcb->rto * slow_tmr_interval);
 		  }
 
 		  /* Reset the retransmission timer. */
@@ -708,6 +714,9 @@ tcp_slowtmr(struct tcp_pcb* pcb)
 
 #if TCP_CC_ALGO_MOD
 		  cc_cong_signal(pcb, CC_RTO);
+#if LWIP_DCTCP
+      dctcp_reduce_cwnd_rto(pcb);
+#endif
 #else
 		  /* Reduce congestion window and ssthresh. */
 		  eff_wnd = LWIP_MIN(pcb->cwnd, pcb->snd_wnd);
@@ -1028,9 +1037,19 @@ void tcp_pcb_init (struct tcp_pcb* pcb, u8_t prio)
 	u16_t snd_mss = pcb->advtsd_mss = (LWIP_TCP_MSS) ? ((LWIP_TCP_MSS > 536) ? 536 : LWIP_TCP_MSS) : 536;
 	UPDATE_PCB_BY_MSS(pcb, snd_mss);
 	pcb->max_unsent_len = pcb->max_tcp_snd_queuelen;
-	pcb->rto = 3000 / slow_tmr_interval;
-	pcb->sa = 0;
-	pcb->sv = 3000 / slow_tmr_interval;
+
+#if TIMER_US_GRAN
+  pcb->minrto = TCP_MIN_RTO / slow_tmr_interval;
+	pcb->rto = TCP_INITIAL_RTO / slow_tmr_interval;  //8 / slow_tmr_interval;
+	pcb->sa = (TCP_INITIAL_RTT_EST << 3) / slow_tmr_interval;  /* Seems to be 8*Average */
+	pcb->sv = 0 / slow_tmr_interval; /* Seems to be 4*Dev */
+#else
+  pcb->minrto = TCP_MIN_RTO / slow_tmr_interval;
+	pcb->rto = TCP_INITIAL_RTO / slow_tmr_interval;  //8 / slow_tmr_interval;
+	pcb->sa = (TCP_INITIAL_RTT_EST << 3) / slow_tmr_interval;  /* Seems to be 8*Average */
+	pcb->sv =0  / slow_tmr_interval; /* Seems to be 4*Dev */
+#endif
+
 	pcb->rtime = -1;
 #if TCP_CC_ALGO_MOD
 	switch (lwip_cc_algo_module) {
@@ -1048,7 +1067,8 @@ void tcp_pcb_init (struct tcp_pcb* pcb, u8_t prio)
 	cc_init(pcb);
 #endif
 	pcb->cwnd = 1;
-	iss = tcp_next_iss();
+	iss = 1; //tcp_next_iss();
+	pcb->iss = iss;
 	pcb->snd_wl2 = iss;
 	pcb->snd_nxt = iss;
 	pcb->lastack = iss;
@@ -1076,6 +1096,31 @@ void tcp_pcb_init (struct tcp_pcb* pcb, u8_t prio)
 	pcb->enable_ts_opt = enable_ts_option;
 	pcb->seg_alloc = NULL;
 	pcb->pbuf_alloc = NULL;
+
+#if LWIP_TCP_SACK
+  pcb->sack_permitted = 0;
+  memset(pcb->snd_sack_block, 0, sizeof(pcb->snd_sack_block));
+  memset(pcb->rcv_sack_block, 0, sizeof(pcb->rcv_sack_block));
+  pcb->rcv_sack_block_cnt = 0;
+  pcb->snd_sack_block_cnt = 0;
+#endif
+
+#if LWIP_TCP_TLT
+  tlt_init(pcb);
+#endif
+
+#if LWIP_DCTCP
+  dctcp_init(pcb);
+#endif
+
+#if LWIP_DEBUG_RTO
+  pcb->rto_log = malloc(sizeof(u32_t)*MAX_LOG_RTO);
+  pcb->rto_log_cnt = 0;
+  
+  DEBUG_RTO_LOG(pcb, pcb->rto * slow_tmr_interval);
+
+#endif
+
 }
 
 struct pbuf *
@@ -1311,6 +1356,18 @@ tcp_pcb_purge(struct tcp_pcb *pcb)
     cc_destroy(pcb);
 #endif
   }
+
+#if LWIP_DEBUG_RTO
+  if (pcb->rto_log && pcb->rto_log_cnt) {
+    printf("============RTO_DEBUG==========\n");
+    for(int i=0; i< pcb->rto_log_cnt; i++) {
+      printf("%u, ", pcb->rto_log[i]);
+    }
+    printf("\n============RTO_DEBUG==========\n");
+  }
+  free(pcb->rto_log);
+  pcb->rto_log = NULL;
+#endif
 }
 
 /**

@@ -38,6 +38,7 @@
 #include "utils/lock_wrapper.h"
 
 #define INFINITE_TIMEOUT (-1)
+#include "custom.h"
 
 class timer_handler;
 class timers_group;
@@ -54,10 +55,19 @@ enum timer_req_type_t {
 };
 
 struct timer_node_t {
+#if TIMER_US_GRAN
+	/* delta time from the previous node (microsec) */
+	unsigned long            delta_time_usec;
+	/* the orig timer requested (saved in order to re-register periodic timers) */
+	unsigned long            orig_time_usec;
+
+#else
 	/* delta time from the previous node (millisec) */
 	unsigned int            delta_time_msec;
 	/* the orig timer requested (saved in order to re-register periodic timers) */
 	unsigned int            orig_time_msec;
+
+#endif
 	/* control thread-safe access to handler. Recursive because unregister_timer_event()
 	 * can be called from handle_timer_expired()
 	 * that is under trylock() inside process_registered_timers
@@ -81,7 +91,10 @@ public:
 	// add a new timer 
 	void    add_new_timer(unsigned int timeout, timer_node_t* node, timer_handler* handler,
 			      void* user_data, timer_req_type_t req_type);
-
+#if TIMER_US_GRAN
+	void    add_new_timer_us(unsigned long timeout, timer_node_t* node, timer_handler* handler,
+			      void* user_data, timer_req_type_t req_type);
+#endif
 	// wakeup existing timer
 	void    wakeup_timer(timer_node_t* node);
 
@@ -95,7 +108,12 @@ public:
 
 	// update the timeout in first element in the list
 	// return the timeout needed. (or INFINITE_TIMEOUT if there's no timeout)
+	
+#if TIMER_US_GRAN
+	long     update_timeout();
+#else
 	int     update_timeout();
+#endif
 
 	// run "tick" func for all the registered timer handler that their timeout expiered
 	void    process_registered_timers();

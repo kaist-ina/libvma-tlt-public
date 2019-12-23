@@ -1,0 +1,36 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"wscript": "python",
+			"tcp.h": "c",
+			"tcp_impl.h": "c",
+			"*.tcc": "c",
+			"list": "c",
+			"opt.h": "c",
+			"tlt.h": "c",
+			"assert.h": "c",
+			"string.h": "c",
+			"bitset": "cpp",
+			"functional": "cpp",
+			"string_view": "c",
+			"unordered_map": "cpp",
+			"unordered_set": "cpp",
+			"delta_timer.h": "c"
+		},
+		"files.exclude": {
+			"**/.deps": true,
+			"**/.libs": true,
+			"**/*.a": true,
+			"**/*.dirstamp": true,
+			"**/*.la": true,
+			"**/*.lo": true,
+			"**/*.o": true
+		},
+		"workbench.colorTheme": "One Monokai"
+	}
+}

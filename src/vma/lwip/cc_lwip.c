@@ -161,7 +161,7 @@ lwip_post_recovery(struct tcp_pcb *pcb)
 static void
 lwip_conn_init(struct tcp_pcb *pcb)
 {
-	pcb->cwnd = ((pcb->cwnd == 1) ? (pcb->mss * 2) : pcb->mss);
+	pcb->cwnd = ((pcb->cwnd == 1) ? (pcb->mss * 10) : pcb->mss);
 }
 
 #endif //TCP_CC_ALGO_MOD

@@ -128,6 +128,8 @@ libvma_la_SOURCES := \
 	lwip/cc_cubic.c \
 	lwip/cc_none.c \
 	lwip/init.c \
+	lwip/tlt.c \
+	lwip/dctcp.c \
 	\
 	proto/ip_frag.cpp \
 	proto/flow_tuple.cpp \
@@ -244,6 +246,8 @@ libvma_la_SOURCES := \
 	lwip/stats.h \
 	lwip/tcp.h \
 	lwip/tcp_impl.h \
+	lwip/tlt.h \
+	lwip/dctcp.h \
 	\
 	netlink/link_info.h \
 	netlink/neigh_info.h \

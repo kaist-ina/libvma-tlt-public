@@ -91,7 +91,11 @@ struct command_ev_t {
 struct timer_reg_info_t {
 	timer_handler*		handler; 
 	void* 			node;
+#if TIMER_US_GRAN
+	unsigned long		timeout_usec;
+#else
 	unsigned int		timeout_msec;
+#endif
 	void*			user_data;
 	timers_group*		group;
 	timer_req_type_t	req_type;
@@ -159,6 +163,9 @@ public:
 	~event_handler_manager();
 
 	void*	register_timer_event(int timeout_msec, timer_handler* handler, timer_req_type_t req_type, void* user_data, timers_group* group = NULL);
+#if TIMER_US_GRAN
+	void*	register_timer_event_us(long timeout_usec, timer_handler* handler, timer_req_type_t req_type, void* user_data, timers_group* group = NULL);
+#endif
 	void	wakeup_timer_event(timer_handler* handler, void* node);
 	void	unregister_timer_event(timer_handler* handler, void* node);
 	void 	unregister_timers_event_and_delete(timer_handler* handler);
@@ -192,7 +199,11 @@ private:
 
 	const bool m_b_sysvar_internal_thread_arm_cq_enabled;
 	const uint32_t m_n_sysvar_vma_time_measure_num_samples;
+#if TIMER_US_GRAN
+	const uint32_t m_n_sysvar_timer_resolution_usec;
+#else
 	const uint32_t m_n_sysvar_timer_resolution_msec;
+#endif
 
 	event_handler_map_t	m_event_handler_map;
 

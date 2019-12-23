@@ -62,3 +62,10 @@ stamp-h1
 VMA_VERSION
 build/libvma.spec
 debian/changelog
+
+# Hwijoon
+tools/daemon/vmad
+contrib/scripts/vma.service
+contrib/scripts/vma.init
+.vscode
+.vscode/**

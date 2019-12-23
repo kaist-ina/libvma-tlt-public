@@ -41,6 +41,7 @@ typedef struct tcp_iovec
 {
 	struct iovec iovec;
 	mem_buf_desc_t* p_desc;
+	u8_t p_tos;
 } tcp_iovec;
 
 class dst_entry_tcp : public dst_entry

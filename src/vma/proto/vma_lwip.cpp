@@ -124,9 +124,15 @@ vma_lwip::vma_lwip()
 	register_tcp_state_observer(sockinfo_tcp::tcp_state_observer);
 	register_ip_route_mtu(sockinfo_tcp::get_route_mtu);
 	register_sys_now(sys_now);
+#if TIMER_US_GRAN
+	set_tmr_resolution(safe_mce_sys().tcp_timer_resolution_usec);
+	//tcp_ticks increases in the rate of tcp slow_timer
+	void *node = g_p_event_handler_manager->register_timer_event_us(safe_mce_sys().tcp_timer_resolution_usec * 2, this, PERIODIC_TIMER, 0);
+#else
 	set_tmr_resolution(safe_mce_sys().tcp_timer_resolution_msec);
 	//tcp_ticks increases in the rate of tcp slow_timer
 	void *node = g_p_event_handler_manager->register_timer_event(safe_mce_sys().tcp_timer_resolution_msec * 2, this, PERIODIC_TIMER, 0);
+#endif
 	if (!node) {
 		lwip_logdbg("LWIP: failed to register timer event");
 		free_lwip_resources();

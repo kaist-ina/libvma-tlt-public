@@ -45,6 +45,7 @@
 #include "vma/ib/base/verbs_extra.h"
 #include "vma/util/sysctl_reader.h"
 #include "vma/vma_extra.h"
+#include "vma/event/delta_timer.h"
 
 typedef enum {
 	MCE_SPEC_NONE = 0,
@@ -384,8 +385,13 @@ public:
 	uint32_t	qp_compensation_level;
 
 	bool		offloaded_sockets;
+#if TIMER_US_GRAN
+	uint32_t	timer_resolution_usec;
+	uint32_t	tcp_timer_resolution_usec;
+#else
 	uint32_t	timer_resolution_msec;
 	uint32_t	tcp_timer_resolution_msec;
+#endif
 	tcp_ctl_thread_t tcp_ctl_thread;
 	tcp_ts_opt_t	tcp_ts_opt;
 	bool		tcp_nodelay;
@@ -523,6 +529,8 @@ extern mce_sys_var & safe_mce_sys();
 #define SYS_VAR_CQ_KEEP_QP_FULL				"VMA_CQ_KEEP_QP_FULL"
 #define SYS_VAR_QP_COMPENSATION_LEVEL			"VMA_QP_COMPENSATION_LEVEL"
 #define SYS_VAR_OFFLOADED_SOCKETS			"VMA_OFFLOADED_SOCKETS"
+#define SYS_VAR_TIMER_RESOLUTION_USEC			"VMA_TIMER_RESOLUTION_USEC"
+#define SYS_VAR_TCP_TIMER_RESOLUTION_USEC		"VMA_TCP_TIMER_RESOLUTION_USEC"
 #define SYS_VAR_TIMER_RESOLUTION_MSEC			"VMA_TIMER_RESOLUTION_MSEC"
 #define SYS_VAR_TCP_TIMER_RESOLUTION_MSEC		"VMA_TCP_TIMER_RESOLUTION_MSEC"
 #define SYS_VAR_TCP_CTL_THREAD				"VMA_TCP_CTL_THREAD"
@@ -580,7 +588,7 @@ extern mce_sys_var & safe_mce_sys();
 #define MCE_DEFAULT_APP_ID				("VMA_DEFAULT_APPLICATION_ID")
 #define MCE_DEFAULT_HANDLE_SIGINTR			(false)
 #define MCE_DEFAULT_HANDLE_SIGFAULT			(false)
-#define MCE_DEFAULT_STATS_FD_NUM			100
+#define MCE_DEFAULT_STATS_FD_NUM			256
 #define MCE_DEFAULT_RING_ALLOCATION_LOGIC_TX            (RING_LOGIC_PER_INTERFACE)
 #define MCE_DEFAULT_RING_ALLOCATION_LOGIC_RX            (RING_LOGIC_PER_INTERFACE)
 #define MCE_DEFAULT_RING_MIGRATION_RATIO_TX             (100)
@@ -647,8 +655,10 @@ extern mce_sys_var & safe_mce_sys();
 #define MCE_DEFAULT_INTERNAL_THREAD_ARM_CQ_ENABLED	(false)
 #define MCE_DEFAULT_QP_FORCE_MC_ATTACH			(false)
 #define MCE_DEFAULT_OFFLOADED_SOCKETS			(true)
-#define MCE_DEFAULT_TIMER_RESOLUTION_MSEC		(10)
-#define MCE_DEFAULT_TCP_TIMER_RESOLUTION_MSEC		(100)
+#define MCE_DEFAULT_TIMER_RESOLUTION_USEC		(10)
+#define MCE_DEFAULT_TCP_TIMER_RESOLUTION_USEC		(10)
+#define MCE_DEFAULT_TIMER_RESOLUTION_MSEC		(1)
+#define MCE_DEFAULT_TCP_TIMER_RESOLUTION_MSEC		(1)
 #define MCE_DEFAULT_TCP_CTL_THREAD			(CTL_THREAD_DISABLE)
 #define MCE_DEFAULT_TCP_TIMESTAMP_OPTION		(TCP_TS_OPTION_DISABLE)
 #define MCE_DEFAULT_TCP_NODELAY 			(false)
